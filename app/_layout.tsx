@@ -34,6 +34,13 @@ export default function RootLayout() {
             headerShown: false 
           }} 
         />
+        <Stack.Screen 
+          name="chat/[id]" 
+          options={{ 
+            title: 'Chat',
+            headerShown: false 
+          }} 
+        />
       </Stack>
     </ThemeProvider>
   );

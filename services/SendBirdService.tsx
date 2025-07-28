@@ -1,7 +1,8 @@
-import SendBird, { BaseChannel, UserUpdateParams } from '@sendbird/chat';
+import SendBird, { BaseChannel, User, UserUpdateParams } from '@sendbird/chat';
 import { GroupChannel, GroupChannelListOrder, GroupChannelModule } from '@sendbird/chat/groupChannel';
 import { BaseMessage, UserMessageCreateParams } from '@sendbird/chat/message';
 import { GroupChannelHandler } from '@sendbird/chat/groupChannel';
+import * as Crypto from 'expo-crypto';
 
 const SENDBIRD_APP_ID = 'DC052E8D-9037-4617-BA99-2CFD341E8B79'; // Replace with your actual SendBird App ID
 const GENERAL_CHAT_URL = 'general_chat';
@@ -19,6 +20,8 @@ export class SendBirdService {
   private static currentUser: any = null;
   private static channelHandlers: Map<string, string> = new Map();
   private static messageHandlers: Map<string, MessageHandler> = new Map();
+  private static invitationHandlerId: string | null = null;
+  private static channelUpdateCallback: (() => void) | null = null;
 
   static async initialize(userId: string, userName: string) {
     try {
@@ -43,13 +46,86 @@ export class SendBirdService {
 
       console.log('SendBird initialized successfully');
       
+      // Add auto-accept invitation handler
+      this.addInvitationHandler();
+      
       // Try to join or create the general chat
       await this.joinOrCreateGeneralChat();
-      
+      await this.joinOrCreateOneToOneChats();
       return user;
     } catch (error) {
       console.error('SendBird initialization error:', error);
       throw error;
+    }
+  }
+
+  // Set callback for when channels are updated
+  static setChannelUpdateCallback(callback: () => void) {
+    this.channelUpdateCallback = callback;
+  }
+
+  // Remove channel update callback
+  static removeChannelUpdateCallback() {
+    this.channelUpdateCallback = null;
+  }
+
+  // Add invitation handler to auto-accept channel invitations
+  static addInvitationHandler() {
+    if (!this.sb) {
+      throw new Error('SendBird not initialized');
+    }
+
+    try {
+      // Create a unique handler ID for invitations
+      this.invitationHandlerId = `invitation_handler_${Date.now()}`;
+      
+      const groupChannelHandler: GroupChannelHandler = new GroupChannelHandler({
+        onUserReceivedInvitation: (channel: GroupChannel, inviter: User | null, invitees: User[]) => {
+          const inviterName = inviter ? (inviter.nickname || inviter.userId) : 'Unknown';
+          console.log(`Received invitation to channel: ${channel.url} from ${inviterName}`);
+          
+          // Simply accept all pending invitations
+          this.acceptAllPendingInvitations()
+            .then(() => {
+              console.log('Auto-accepted all pending invitations');
+              // Trigger UI refresh after accepting invitations
+              if (this.channelUpdateCallback) {
+                this.channelUpdateCallback();
+              }
+            })
+            .catch((error) => {
+              console.error('Error auto-accepting pending invitations:', error);
+            });
+        },
+        
+        // Optional: Handle when invitation is declined by others
+        onUserDeclinedInvitation: (channel: GroupChannel, invitee: User, inviter: User | null) => {
+          const inviterName = inviter ? (inviter.nickname || inviter.userId) : 'Unknown';
+          console.log(`User ${invitee.nickname || invitee.userId} declined invitation to channel: ${channel.url} from ${inviterName}`);
+        }
+      });
+      
+      // Add the handler
+      this.sb.groupChannel.addGroupChannelHandler(this.invitationHandlerId, groupChannelHandler);
+      console.log(`Added invitation handler with ID: ${this.invitationHandlerId}`);
+      
+    } catch (error) {
+      console.error('Error adding invitation handler:', error);
+    }
+  }
+
+  // Remove invitation handler
+  static removeInvitationHandler() {
+    if (!this.sb || !this.invitationHandlerId) {
+      return;
+    }
+
+    try {
+      this.sb.groupChannel.removeGroupChannelHandler(this.invitationHandlerId);
+      console.log(`Removed invitation handler with ID: ${this.invitationHandlerId}`);
+      this.invitationHandlerId = null;
+    } catch (error) {
+      console.error('Error removing invitation handler:', error);
     }
   }
 
@@ -83,6 +159,135 @@ export class SendBirdService {
     } catch (error) {
       console.error('Error joining or creating general chat:', error);
       return null;
+    }
+  }
+  // Helper method to accept all pending invitations
+  static async acceptAllPendingInvitations(): Promise<void> {
+    if (!this.sb) {
+      throw new Error('SendBird not initialized');
+    }
+
+    try {
+      // Get all group channel invitations
+      const invitationListQuery = this.sb.groupChannel.createMyGroupChannelListQuery();
+      console.log("invitationListQuery", invitationListQuery);
+      if (invitationListQuery.hasNext) {
+        const invitedChannels = await invitationListQuery.next();
+        
+        for (const channel of invitedChannels) {
+          try {
+            await channel.acceptInvitation();
+            console.log(`Accepted invitation for channel: ${channel.url}`);
+          } catch (error) {
+            console.error(`Error accepting invitation for channel ${channel.url}:`, error);
+          }
+        }
+      }
+    } catch (error) {
+      console.error('Error accepting pending invitations:', error);
+    }
+  }
+
+  static async joinOrCreateOneToOneChats(): Promise<void> {
+    if (!this.sb || !this.currentUser) {
+      throw new Error('SendBird not initialized');
+    }
+  
+    // First, accept all pending invitations
+    await this.acceptAllPendingInvitations();
+
+    try {
+      const users = await this.getAllUsers();
+      if (!users) {
+        throw new Error('No users found');
+      }
+  
+      for (const user of users) {
+        // Skip creating chat with yourself
+        if (user.userId === this.currentUser.userId) {
+          continue;
+        }
+  
+        // Create deterministic channel URL by sorting user IDs
+        const sortedUserIds = [user.userId, this.currentUser.userId].sort();
+        const channelUrl = await Crypto.digestStringAsync(
+          Crypto.CryptoDigestAlgorithm.SHA256, 
+          `${sortedUserIds[0]}_${sortedUserIds[1]}`
+        );
+  
+        try {
+          // First try to get the existing channel
+          const channel = await this.sb.groupChannel.getChannel(channelUrl);
+          
+          // Check if current user is already a member
+          const isMember = channel.members.some(
+            (member: any) => member.userId === this.currentUser.userId
+          );
+          
+          // If not a member, the channel exists but we're not in it
+          if (!isMember) {
+            console.log(`Channel exists with ${user.userId} but not a member, skipping for now...`);
+            // The channel exists but we can't join - this will be handled by the other user's invitation
+            continue;
+          } else {
+            console.log(`Already a member of chat with ${user.userId}`);
+          }
+        } catch (getChannelError) {
+          // Channel doesn't exist, try to create it
+          console.log(`One-to-one chat not found with ${user.userId}, creating...`);
+          try {
+            const channel = await this.sb.groupChannel.createChannel({
+              channelUrl,
+              isDistinct: true, // Prevents duplicate channels
+              isPublic: false, // Keep it private
+              isSuper: false,
+              name: `${user.nickname || user.userId} & ${this.currentUser.nickname || this.currentUser.userId}`,
+              operatorUserIds: [this.currentUser.userId, user.userId], // Make current user an operator
+            });
+            
+            // Now invite the other user
+            try {
+              await channel.invite([user]);
+              console.log(`Created channel and invited ${user.userId}`);
+            } catch (inviteError) {
+              console.error(`Error inviting ${user.userId} to new channel:`, inviteError);
+            }
+            
+          } catch (createError: any) {
+            // Check if the error is due to channel already existing (unique constraint violation)
+            if (createError.message && (
+              createError.message.includes('violates unique constraint') ||
+              createError.message.includes('already exists') ||
+              createError.code === 400201
+            )) {
+              console.log(`Channel already exists with ${user.userId}, will be handled by invitation acceptance`);
+              // Don't try to join - let the invitation system handle it
+              continue;
+            } else {
+              console.error(`Error creating channel with ${user.userId}:`, createError);
+            }
+            continue;
+          }
+        }
+      }
+    } catch (error) {
+      console.error('Error in joinOrCreateOneToOneChats:', error);
+      throw error;
+    }
+  }
+
+  static async getAllUsers(): Promise<User[] | null> {
+    if (!this.sb || !this.currentUser) {
+      throw new Error('SendBird not initialized');
+    }
+    
+    try {
+      const channel = await this.sb.groupChannel.getChannel(GENERAL_CHAT_URL);
+      const users = channel.members;
+      return users;
+    } catch (error) {
+      console.error('Error fetching users:', error);
+      return [];
     }
   }
 
@@ -276,6 +481,12 @@ static removeChannelHandler(channelUrl: string) {
 
   static async disconnect() {
     if (this.sb) {
+      // Remove invitation handler
+      this.removeInvitationHandler();
+      
+      // Remove channel update callback
+      this.removeChannelUpdateCallback();
+      
       // Remove all channel handlers
       for (const [channelUrl, handlerId] of this.channelHandlers.entries()) {
         this.sb.groupChannel.removeGroupChannelHandler(handlerId);

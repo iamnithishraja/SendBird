@@ -30,6 +30,10 @@ export class AuthService {
     return user;
   }
 
+  static async clearStorage(): Promise<void> {
+    await store.delete(USER_KEY);
+  }
+
   static async clearUser(): Promise<void> {
     await store.delete(USER_KEY);
   }

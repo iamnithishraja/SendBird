@@ -5,7 +5,7 @@ import { AuthService, User } from '@/services/AuthService';
 import { SendBirdService } from '@/services/SendBirdService';
 import { GroupChannel } from '@sendbird/chat/groupChannel';
 import { useRouter } from 'expo-router';
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useCallback } from 'react';
 import {
   FlatList,
   SafeAreaView,
@@ -13,11 +13,13 @@ import {
   Text,
   TouchableOpacity,
   View,
+  RefreshControl,
 } from 'react-native';
 
 export default function IndexScreen() {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
   const [channels, setChannels] = useState<GroupChannel[]>([]);
   const router = useRouter();
   const colorScheme = useColorScheme();
@@ -25,6 +27,11 @@ export default function IndexScreen() {
 
   useEffect(() => {
     initializeApp();
+    
+    // Cleanup on unmount
+    return () => {
+      SendBirdService.removeChannelUpdateCallback();
+    };
   }, []);
 
   const initializeApp = async () => {
@@ -39,6 +46,13 @@ export default function IndexScreen() {
 
       // Initialize SendBird and load channels
       await SendBirdService.initialize(userData.id, userData.name);
+      
+      // Set up callback for when new channels are added via invitations
+      SendBirdService.setChannelUpdateCallback(() => {
+        console.log('Channel update triggered, refreshing channels list...');
+        loadChannels();
+      });
+      
       await loadChannels();
     } catch (error) {
       console.error('Error initializing app:', error);
@@ -60,12 +74,30 @@ export default function IndexScreen() {
           setChannels([generalChat]);
         }
       } else {
-        setChannels(channelList);
+        // Sort channels by last message timestamp (most recent first)
+        const sortedChannels = channelList.sort((a, b) => {
+          const aTime = a.lastMessage?.createdAt || a.createdAt;
+          const bTime = b.lastMessage?.createdAt || b.createdAt;
+          return bTime - aTime;
+        });
+        setChannels(sortedChannels);
       }
     } catch (error) {
       console.error('Error loading channels:', error);
     }
   };
+
+  const onRefresh = useCallback(async () => {
+    setRefreshing(true);
+    try {
+      await loadChannels();
+      console.log('Manual refresh completed');
+    } catch (error) {
+      console.error('Error during manual refresh:', error);
+    } finally {
+      setRefreshing(false);
+    }
+  }, []);
 
   const handleChatPress = (channelUrl: string) => {
     router.push(`/chat/${channelUrl}`);
@@ -85,6 +117,23 @@ export default function IndexScreen() {
 
   return (
     <SafeAreaView style={[styles.container, { backgroundColor: isDark ? '#000' : '#fff' }]}>
+      <View style={styles.header}>
+        <Text style={[styles.headerText, { color: isDark ? '#fff' : '#000' }]}>
+          Welcome {user?.name}
+        </Text>
+        <TouchableOpacity onPress={() => {
+          // Cleanup before logout
+          SendBirdService.removeChannelUpdateCallback();
+          SendBirdService.disconnect();
+          AuthService.clearStorage();
+          router.replace('/credentials');
+        }}>
+          <Text style={[styles.headerText, { color: isDark ? '#007AFF' : '#007AFF' }]}>
+            Logout
+          </Text>
+        </TouchableOpacity>
+      </View>
+      
       <View style={styles.content}>
         {channels.length > 0 ? (
           <FlatList
@@ -93,6 +142,13 @@ export default function IndexScreen() {
             keyExtractor={(item) => item.url}
             showsVerticalScrollIndicator={false}
             contentContainerStyle={styles.listContainer}
+            refreshControl={
+              <RefreshControl
+                refreshing={refreshing}
+                onRefresh={onRefresh}
+                tintColor={isDark ? '#fff' : '#000'}
+              />
+            }
           />
         ) : (
           <View style={styles.emptyContainer}>
@@ -101,7 +157,7 @@ export default function IndexScreen() {
             </Text>
             <TouchableOpacity
               style={[styles.refreshButton, { backgroundColor: isDark ? '#333' : '#eee' }]}
-              onPress={loadChannels}
+              onPress={onRefresh}
             >
               <Text style={[styles.refreshButtonText, { color: isDark ? '#fff' : '#000' }]}>
                 Refresh
@@ -110,6 +166,14 @@ export default function IndexScreen() {
           </View>
         )}
       </View>
+      
+      {channels.length > 0 && (
+        <View style={styles.footer}>
+          <Text style={[styles.footerText, { color: isDark ? '#666' : '#999' }]}>
+            {channels.length} chat{channels.length !== 1 ? 's' : ''} • Real-time updates
+          </Text>
+        </View>
+      )}
     </SafeAreaView>
   );
 }
@@ -124,6 +188,7 @@ const styles = StyleSheet.create({
   },
   listContainer: {
     paddingTop: 20,
+    paddingBottom: 20,
   },
   emptyContainer: {
     flex: 1,
@@ -141,5 +206,28 @@ const styles = StyleSheet.create({
   },
   refreshButtonText: {
     fontSize: 16,
+  },
+  header: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: '#eee',
+  },
+  headerText: {
+    fontSize: 16,
+    fontWeight: 'bold',
+  },
+  footer: {
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderTopWidth: 1,
+    borderTopColor: '#eee',
+    alignItems: 'center',
+  },
+  footerText: {
+    fontSize: 12,
   },
 });

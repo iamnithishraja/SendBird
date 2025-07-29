@@ -1,16 +1,19 @@
 import { SendBirdService } from '@/services/SendBirdService';
 import { BaseMessage, Sender, UserMessage } from '@sendbird/chat/message';
-import React from 'react';
+import { GroupChannel } from '@sendbird/chat/groupChannel';
+import React, { useEffect, useState } from 'react';
 import {
   StyleSheet,
   Text,
   View,
 } from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
 
 interface MessageItemProps {
   message: BaseMessage;
   isDark: boolean;
   isLastMessage: boolean;
+  channel?: GroupChannel; // Add channel prop to get read status
 }
 
 // Type guard to check if message is a UserMessage
@@ -23,12 +26,59 @@ interface MessageWithSender extends BaseMessage {
   sender?: Sender;
 }
 
-const MessageItem: React.FC<MessageItemProps> = ({ message, isDark, isLastMessage }) => {
+const MessageItem: React.FC<MessageItemProps> = ({ 
+  message, 
+  isDark, 
+  isLastMessage, 
+  channel 
+}) => {
   const currentUser = SendBirdService.getCurrentUser();
-  // Cast message to include sender property
   const messageWithSender = message as MessageWithSender;
   const isMyMessage = messageWithSender.sender?.userId === currentUser?.userId;
   
+  // State for read receipt status
+  const [readStatus, setReadStatus] = useState<{
+    isRead: boolean;
+    isDelivered: boolean;
+    unreadCount: number;
+  }>({
+    isRead: false,
+    isDelivered: false,
+    unreadCount: 0
+  });
+
+  // Calculate read status when component mounts or message/channel changes
+  useEffect(() => {
+    if (isMyMessage && channel && message.sendingStatus === 'succeeded') {
+      calculateReadStatus();
+    }
+  }, [message, channel, isMyMessage]);
+
+  const calculateReadStatus = () => {
+    if (!channel || !isMyMessage) return;
+
+    try {
+      // Get unread member count for this message
+      const unreadCount = channel.getUnreadMemberCount ? 
+        channel.getUnreadMemberCount(message) : 0;
+      
+      // Message is read by all if unread count is 0
+      const isRead = unreadCount === 0;
+      
+      // For delivery status, we can check if message was sent successfully
+      // In a real implementation, you might want to track delivery separately
+      const isDelivered = message.sendingStatus === 'succeeded';
+
+      setReadStatus({
+        isRead,
+        isDelivered,
+        unreadCount
+      });
+    } catch (error) {
+      console.error('Error calculating read status:', error);
+    }
+  };
+
   const getMessageText = () => {
     if (isUserMessage(message)) {
       return message.message || 'Message';
@@ -49,6 +99,57 @@ const MessageItem: React.FC<MessageItemProps> = ({ message, isDark, isLastMessag
   const getInitial = () => {
     const name = getSenderName();
     return name && name.length > 0 ? name.charAt(0).toUpperCase() : '?';
+  };
+
+  // Render read receipt indicator for sent messages
+  const renderReadReceipt = () => {
+    if (!isMyMessage || message.sendingStatus !== 'succeeded') {
+      return null;
+    }
+
+    // Show different states based on read status
+    if (readStatus.isRead) {
+      // All members have read the message - blue double tick
+      return (
+        <View style={styles.readReceiptContainer}>
+          <Ionicons 
+            name="checkmark-done" 
+            size={14} 
+            color="#007AFF" 
+            style={styles.readReceiptIcon}
+          />
+        </View>
+      );
+    } else if (readStatus.isDelivered) {
+      // Message delivered but not read by all - gray double tick
+      return (
+        <View style={styles.readReceiptContainer}>
+          <Ionicons 
+            name="checkmark-done" 
+            size={14} 
+            color={isDark ? '#666' : '#999'} 
+            style={styles.readReceiptIcon}
+          />
+          {readStatus.unreadCount > 0 && (
+            <Text style={[styles.unreadCountText, { color: isDark ? '#666' : '#999' }]}>
+              {readStatus.unreadCount}
+            </Text>
+          )}
+        </View>
+      );
+    } else {
+      // Message sending or failed - single tick
+      return (
+        <View style={styles.readReceiptContainer}>
+          <Ionicons 
+            name="checkmark" 
+            size={14} 
+            color={isDark ? '#666' : '#999'} 
+            style={styles.readReceiptIcon}
+          />
+        </View>
+      );
+    }
   };
 
   return (
@@ -90,9 +191,12 @@ const MessageItem: React.FC<MessageItemProps> = ({ message, isDark, isLastMessag
               {getMessageText()}
             </Text>
           </View>
-          <Text style={[styles.timeText, styles.myTimeText, { color: isDark ? '#999' : '#999' }]}>
-            {formatTime()}
-          </Text>
+          <View style={styles.myMessageFooter}>
+            <Text style={[styles.timeText, styles.myTimeText, { color: isDark ? '#999' : '#999' }]}>
+              {formatTime()}
+            </Text>
+            {renderReadReceipt()}
+          </View>
         </View>
       )}
     </View>
@@ -166,6 +270,24 @@ const styles = StyleSheet.create({
   },
   myTimeText: {
     textAlign: 'right',
+  },
+  myMessageFooter: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'flex-end',
+    gap: 4,
+  },
+  readReceiptContainer: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 2,
+  },
+  readReceiptIcon: {
+    marginLeft: 2,
+  },
+  unreadCountText: {
+    fontSize: 8,
+    fontWeight: 'bold',
   },
 });
 

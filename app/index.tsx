@@ -28,7 +28,6 @@ export default function IndexScreen() {
   useEffect(() => {
     initializeApp();
     
-    // Cleanup on unmount
     return () => {
       SendBirdService.removeChannelUpdateCallback();
     };
@@ -36,7 +35,6 @@ export default function IndexScreen() {
 
   const initializeApp = async () => {
     try {
-      // Load user data
       const userData = await AuthService.getUser();
       if (!userData) {
         router.replace('/credentials');
@@ -44,10 +42,9 @@ export default function IndexScreen() {
       }
       setUser(userData);
 
-      // Initialize SendBird and load channels
       await SendBirdService.initialize(userData.id, userData.name);
       
-      // Set up callback for when new channels are added via invitations
+      // Set up callback for real-time channel list updates
       SendBirdService.setChannelUpdateCallback(() => {
         console.log('Channel update triggered, refreshing channels list...');
         loadChannels();
@@ -64,10 +61,8 @@ export default function IndexScreen() {
 
   const loadChannels = async () => {
     try {
-      // Get all channels
       const channelList = await SendBirdService.getChannels();
       
-      // If no channels, the user might need to join the general chat
       if (channelList.length === 0) {
         const generalChat = await SendBirdService.joinOrCreateGeneralChat();
         if (generalChat) {
@@ -122,7 +117,6 @@ export default function IndexScreen() {
           Welcome {user?.name}
         </Text>
         <TouchableOpacity onPress={() => {
-          // Cleanup before logout
           SendBirdService.removeChannelUpdateCallback();
           SendBirdService.disconnect();
           AuthService.clearStorage();
